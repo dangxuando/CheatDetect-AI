@@ -8,3 +8,4 @@ torchvision
 eventlet
 gevent
 gevent-websocket
+flask-cors
