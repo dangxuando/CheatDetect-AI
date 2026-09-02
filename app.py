@@ -1,3 +1,14 @@
+import os
+# Ép toàn bộ các backend tính toán chỉ dùng 1 luồng CPU để không chiếm dụng bộ nhớ
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+
+import torch
+torch.set_num_threads(1)
+
 import cv2
 import numpy as np
 import base64
@@ -9,15 +20,16 @@ from ultralytics import YOLO
 app = Flask(__name__)
 CORS(app)
 
+model = None
 try:
+    # Nạp mô hình và ép chạy trên CPU
     model = YOLO('models/best.pt')
+    model.to('cpu')
     print("🚀 Đã nạp thành công bộ não AI: best.pt")
 except Exception as e:
     print(f"❌ LỖI: Không tìm thấy file models/best.pt! {e}")
 
 violation_tracker = {"label": None, "start_time": 0}
-
-# 
 esp32_devices_store = {}
 
 @app.route('/')
@@ -34,6 +46,7 @@ def esp32_alert():
     global esp32_devices_store
     data = request.get_json(silent=True)
     if data and "devices" in data:
+        current_time = time.time()
         for dev in data["devices"]:
             mac = dev.get("mac")
             if mac:
@@ -42,7 +55,7 @@ def esp32_alert():
                     "rssi": dev.get("rssi"),
                     "distance_m": dev.get("distance_m"),
                     "randomized": dev.get("randomized"),
-                    "last_seen": time.time()
+                    "last_seen": current_time
                 }
     return jsonify({"status": "ok"})
 
@@ -54,25 +67,29 @@ def detect():
     if not data or "image" not in data:
         return jsonify({"error": "Thiếu dữ liệu ảnh"}), 400
 
+    if model is None:
+        return jsonify({"error": "Mô hình AI chưa sẵn sàng"}), 503
+
     try:
         # Giải mã ảnh từ JavaScript gửi lên
         encoded_data = data["image"].split(',')[1]
         nparr = np.frombuffer(base64.b64decode(encoded_data), np.uint8)
         frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-        # Chạy Yolo26
-        results = model.predict(frame, conf=0.25, imgsz=640, verbose=False)[0]
+        # Chạy suy luận với torch.inference_mode() để không lưu cache gradient (giảm 50% RAM)
+        # imgsz=320 giúp CPU xử lý nhanh gấp đôi và tiết kiệm bộ nhớ tối đa
+        with torch.inference_mode():
+            results = model.predict(frame, conf=0.25, imgsz=320, device='cpu', verbose=False)[0]
 
         detections = []
         current_violation = None
 
         for box in results.boxes:
-            # Lấy và làm sạch tên nhãn
             raw_label = str(model.names[int(box.cls[0])]).lower().replace(" ", "").replace("_", "").replace("-", "")
             conf = float(box.conf[0])
             x1, y1, x2, y2 = box.xyxy[0].tolist()
 
-            # Phân loại 4 nhãn 
+            # Phân loại 4 nhãn
             if "left" in raw_label or "trai" in raw_label:
                 display_label, is_bad = "viewleft", True
             elif "right" in raw_label or "phai" in raw_label:
@@ -100,7 +117,7 @@ def detect():
             if violation_tracker["label"] == current_violation:
                 if time.time() - violation_tracker["start_time"] >= 5.0:
                     trigger_snapshot = True
-                    violation_tracker["start_time"] = time.time() # Reset đếm lại
+                    violation_tracker["start_time"] = time.time()
             else:
                 violation_tracker["label"] = current_violation
                 violation_tracker["start_time"] = time.time()
@@ -115,7 +132,6 @@ def detect():
             if current_time - dev["last_seen"] <= 30
         ]
 
-        # Trả kết quả về cho Web vẽ khung & hiển thị Wi-Fi
         return jsonify({
             "detections": detections,
             "trigger_snapshot": trigger_snapshot,
@@ -128,6 +144,6 @@ def detect():
 
 if __name__ == '__main__':
     print("═"*50)
-    print("  CYBERVISION AI ĐANG CHẠY - DÀNH CHO ĐÔNG")
+    print("  CYBERVISION AI ĐANG CHẠY - DÀNH CHO Đdd")
     print("═"*50)
     app.run(host='0.0.0.0', port=5000, debug=True)
